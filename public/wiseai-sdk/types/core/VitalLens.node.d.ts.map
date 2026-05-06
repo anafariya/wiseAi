@@ -1,0 +1,1 @@
+{"version":3,"file":"VitalLens.node.d.ts","sourceRoot":"","sources":["../../../src/core/VitalLens.node.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,aAAa,EAAE,MAAM,kBAAkB,CAAC;AAEjD,OAAO,EAAE,gBAAgB,EAAE,MAAM,eAAe,CAAC;AACjD,OAAO,EAAE,oBAAoB,EAAE,MAAM,+BAA+B,CAAC;AAErE,qBAAa,SAAU,SAAQ,aAAa;IAC1C,SAAS,CAAC,gBAAgB,CAAC,OAAO,EAAE,gBAAgB,GAAG,oBAAoB;CAG5E"}

@@ -1,0 +1,193 @@
+import { MethodHandler } from './MethodHandler';
+import { VitalLensAPIError, VitalLensAPIKeyError, VitalLensAPIQuotaExceededError, } from '../utils/errors';
+import { VitalMetadataCache } from '../utils/VitalMetadataCache';
+const STREAM_RESET_BUFFER_THRESHOLD = 100; // Frames
+/**
+ * Handler for processing frames using the VitalLens API via REST.
+ */
+export class VitalLensAPIHandler extends MethodHandler {
+    client;
+    options;
+    ready = false;
+    requestedModelName;
+    resolvedModelName;
+    constructor(client, options) {
+        super(options);
+        this.client = client;
+        this.options = options;
+        if (options.method.startsWith('wiseai') &&
+            options.method !== 'wiseai') {
+            // Map the public-facing 'wiseai-*' model identifier to the cloud's
+            // 'vitallens-*' namespace (the backend still recognizes vitallens model names).
+            this.requestedModelName = options.method.replace(/^wiseai/, 'vitallens');
+        }
+    }
+    /**
+     * Initialise the method.
+     */
+    async init() {
+        if (this.ready)
+            return;
+        const key = this.options.apiKey;
+        const isPlaceholder = key === 'YOUR_API_KEY' || key === 'YOUR_API_KEY_HERE';
+        if (!this.options.proxyUrl && (!key || isPlaceholder)) {
+            throw new VitalLensAPIKeyError('Invalid or missing API Key. Please replace "YOUR_API_KEY" with your actual key, or configure a proxyUrl.');
+        }
+        try {
+            const response = await this.client.resolveModel(this.requestedModelName);
+            this._parseAndSetConfig(response);
+            this.ready = true;
+        }
+        catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            if (msg.includes('401') ||
+                msg.includes('403') ||
+                msg.includes('Failed to fetch') ||
+                msg.includes('invalid')) {
+                throw new VitalLensAPIKeyError(`Invalid API Key or CORS failure: ${msg}`);
+            }
+            throw new VitalLensAPIError(`Failed to initialize WiseAI API handler: ${msg}`, { cause: error });
+        }
+    }
+    /**
+     * Parses the response from /resolve-model and sets the method config.
+     * @param response The response from the API.
+     */
+    _parseAndSetConfig(response) {
+        const apiConfig = response.config;
+        const supportedVitals = (apiConfig.supported_vitals || [])
+            .map((code) => {
+            const meta = VitalMetadataCache.getMeta(code);
+            return (meta?.id || code);
+        })
+            .filter(Boolean);
+        this.config = {
+            method: response.resolved_model,
+            fpsTarget: apiConfig.fps_target,
+            roiMethod: apiConfig.roi_method,
+            inputSize: apiConfig.input_size,
+            minWindowLengthState: apiConfig.n_inputs,
+            minWindowLength: 16,
+            maxWindowLength: 900,
+            requiresState: true,
+            bufferOffset: 1.5,
+            supportedVitals,
+        };
+        this.resolvedModelName = response.resolved_model;
+    }
+    /**
+     * Cleanup the method.
+     */
+    async cleanup() {
+        // Nothing to do
+    }
+    /**
+     * Get readiness state.
+     * @returns Whether the method is ready for prediction.
+     */
+    getReady() {
+        return this.ready;
+    }
+    /**
+     * Get the method name. Subclasses must implement this.
+     * @returns The method name.
+     */
+    getMethodName() {
+        return this.resolvedModelName || 'WiseAI API';
+    }
+    /**
+     * Private helper to parse the API response.
+     * @param response - The response from the API.
+     * @param framesChunk - Frame chunk sent, already in shape (n_frames, 40, 40, 3).
+     * @returns A VitalLensResult
+     */
+    _parseAPIResponse(response, framesChunk) {
+        if (!response || typeof response.statusCode !== 'number') {
+            throw new VitalLensAPIError('Invalid response format');
+        }
+        if (response.statusCode !== 200) {
+            const message = response.body ? response.body.message : 'Unknown error';
+            if (response.statusCode === 403) {
+                throw new VitalLensAPIKeyError();
+            }
+            else if (response.statusCode === 429) {
+                throw new VitalLensAPIQuotaExceededError();
+            }
+            else if (response.statusCode === 400) {
+                throw new VitalLensAPIError(`Parameters missing: ${message}`);
+            }
+            else if (response.statusCode === 422) {
+                throw new VitalLensAPIError(`Issue with provided parameters: ${message}`);
+            }
+            else if (response.statusCode >= 500) {
+                throw new VitalLensAPIError(`Error ${response.statusCode} in the API: ${message}`);
+            }
+            throw new VitalLensAPIError(`Error ${response.statusCode}: ${message}`);
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const parsedResponse = response.body;
+        const n = parsedResponse.n ?? framesChunk.getTimestamp().length;
+        const roi = framesChunk.getROI();
+        const coords = roi.map((r) => [r.x0, r.y0, r.x1, r.y1]);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const vitals = parsedResponse.vitals || {};
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const waveforms = parsedResponse.waveforms || {};
+        if (Object.keys(vitals).length > 0 || Object.keys(waveforms).length > 0) {
+            return {
+                face: {
+                    coordinates: coords.slice(-n),
+                    confidence: parsedResponse.face?.confidence?.slice(-n),
+                    note: 'Face detection coordinates for this face, along with live confidence levels.',
+                },
+                vitals,
+                waveforms,
+                state: parsedResponse.state,
+                model_used: parsedResponse.model_used,
+                time: framesChunk.getTimestamp().slice(-n),
+                n: parsedResponse.n,
+                message: 'The provided values are estimates and should be interpreted according to the provided confidence levels ranging from 0 to 1. The WiseAI SDK is not a medical device and its estimates are not intended for any medical purposes.',
+            };
+        }
+        return undefined;
+    }
+    /**
+     * Sends a buffer of frames to the VitalLens API via the selected client and processes the response.
+     * @param framesChunk - Frame chunk to send, already in shape (n_frames, 40, 40, 3).
+     * @param mode - The inference mode.
+     * @param state - Optional recurrent state from the previous API call.
+     * @param bufferSize - Optional current size of the buffer.
+     * @returns A promise that resolves to the processed result.
+     */
+    async process(framesChunk, mode, state, bufferSize) {
+        if (!this.ready) {
+            throw new Error('WiseAI API handler is not initialized. Call init() first.');
+        }
+        // Circuit breaker logic for stream mode
+        if (mode === 'stream' &&
+            bufferSize &&
+            bufferSize > STREAM_RESET_BUFFER_THRESHOLD) {
+            throw new VitalLensAPIError(`Network instability detected. Frame buffer exceeded ${STREAM_RESET_BUFFER_THRESHOLD} frames. Resetting stream.`);
+        }
+        try {
+            // Use the same default origin as vitallens.js: the cloud /file endpoint
+            // validates request bodies against allowed clients; 'wiseai-sdk' is rejected there.
+            const metadata = {
+                origin: this.options.origin || 'vitallens.js',
+                ...(this.requestedModelName && { model: this.requestedModelName }),
+            };
+            // Send the payload
+            const response = (await this.client.sendFrames(metadata, framesChunk.getUint8Array(), mode, state));
+            // Parse the successful response
+            return this._parseAPIResponse(response, framesChunk);
+        }
+        catch (error) {
+            if (error instanceof VitalLensAPIError ||
+                error instanceof VitalLensAPIKeyError ||
+                error instanceof VitalLensAPIQuotaExceededError) {
+                throw error;
+            }
+            throw new VitalLensAPIError(error instanceof Error ? error.message : 'Unknown error');
+        }
+    }
+}

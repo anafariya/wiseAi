@@ -1,0 +1,44 @@
+import { VitalLensBase } from './VitalLensBase';
+import { VitalLensResult } from '../types';
+export declare class VitalLensMonitor extends VitalLensBase {
+    private state;
+    private currentMode;
+    private videoEl;
+    private startScreen;
+    private cameraLayer;
+    private bottomPanel;
+    private messageEl;
+    private statusBadge;
+    private statusText;
+    private ppgCanvas;
+    private ppgSpinner;
+    private respCanvas;
+    private respSpinner;
+    private waveformPlayer;
+    private ppgChart;
+    private respChart;
+    private ppgSampleCount;
+    private receivedVitals;
+    private stream;
+    private isFaceCurrentlyDetected;
+    private ppgConfHistory;
+    private respConfHistory;
+    private faceConfHistory;
+    constructor();
+    connectedCallback(): void;
+    disconnectedCallback(): void;
+    protected getElements(): void;
+    private startProcessing;
+    private stopProcessing;
+    protected updateUI(result: VitalLensResult): void;
+    private evaluateChartReadiness;
+    private transitionState;
+    private clearMeasurements;
+    protected updateHRVDisplay(): void;
+    private configureVitalMeta;
+    private updateValue;
+    private createChart;
+    private updateChart;
+    protected resetUI(): void;
+}
+//# sourceMappingURL=VitalLensMonitor.d.ts.map

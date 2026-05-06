@@ -1,0 +1,1 @@
+{"version":3,"file":"IStreamProcessor.d.ts","sourceRoot":"","sources":["../../../src/types/IStreamProcessor.ts"],"names":[],"mappings":"AAAA,MAAM,WAAW,gBAAgB;IAC/B,IAAI,IAAI,IAAI,CAAC;IACb,KAAK,IAAI,OAAO,CAAC,IAAI,CAAC,CAAC;IACvB,YAAY,IAAI,OAAO,CAAC;IACxB,IAAI,IAAI,IAAI,CAAC;IACb,mBAAmB,CAAC,OAAO,EAAE,OAAO,GAAG,IAAI,CAAC;IAC5C,KAAK,IAAI,IAAI,CAAC;CACf"}

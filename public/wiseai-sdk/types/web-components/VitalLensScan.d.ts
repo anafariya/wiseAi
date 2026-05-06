@@ -1,0 +1,43 @@
+import { VitalLensBase } from './VitalLensBase';
+import { VitalLensResult } from '../types';
+export declare class VitalLensScan extends VitalLensBase {
+    private state;
+    private currentMode;
+    private videoEl;
+    private startScreen;
+    private resultScreen;
+    private cameraLayer;
+    private messageEl;
+    private statusBadge;
+    private statusText;
+    private progressFg;
+    private apertureWrapper;
+    private readonly SCAN_DURATION;
+    private readonly WARM_UP_DURATION;
+    private readonly RECOVERY_TIMEOUT;
+    private accumulatedScanTime;
+    private stateStartTime;
+    private lastFrameTime;
+    private strikeCount;
+    private totalFramesProcessed;
+    private ppgConfHistory;
+    private faceConfHistory;
+    private respConfHistory;
+    private ppgHistory;
+    private respHistory;
+    private stream;
+    constructor();
+    connectedCallback(): void;
+    disconnectedCallback(): void;
+    protected getElements(): void;
+    private startProcessing;
+    private stopCamera;
+    private resetToIdle;
+    private transitionState;
+    private handleIssue;
+    protected updateUI(result: VitalLensResult): void;
+    private finishScan;
+    private updateProgress;
+    protected resetUI(): void;
+}
+//# sourceMappingURL=VitalLensScan.d.ts.map

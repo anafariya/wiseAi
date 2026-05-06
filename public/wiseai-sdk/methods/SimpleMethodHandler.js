@@ -1,0 +1,59 @@
+import { MethodHandler } from './MethodHandler';
+/**
+ * Base class for simple rPPG methods (e.g., POS, CHROM, G).
+ */
+export class SimpleMethodHandler extends MethodHandler {
+    constructor(options) {
+        super(options);
+    }
+    /**
+     * Initialise the method.
+     */
+    async init() {
+        // Nothing needs to be initialized for simple methods.
+    }
+    /**
+     * Cleanup the method.
+     */
+    async cleanup() {
+        // Nothing needs to be initialized for simple methods.
+    }
+    /**
+     * Get readiness state.
+     * @returns Whether the method is ready for prediction.
+     */
+    getReady() {
+        // Always ready
+        return true;
+    }
+    /**
+     * Processes a chunk of rgb signals to compute vitals.
+     * @param rgb - Frame of rgb signals to process.
+     * @param mode - The inference mode.
+     * @returns A promise that resolves to the processed result.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async process(rgb, mode) {
+        const ppg = this.algorithm(rgb);
+        return {
+            face: {
+                coordinates: rgb
+                    .getROI()
+                    .map((roi) => [roi.x0, roi.y0, roi.x1, roi.y1]),
+                confidence: new Array(ppg.length).fill(1.0),
+                note: 'Face detection coordinates for this face, along with live confidence levels. This method is not capable of providing a confidence estimate, hence returning 1.',
+            },
+            vitals: {},
+            waveforms: {
+                ppg_waveform: {
+                    data: ppg,
+                    unit: 'bpm',
+                    confidence: new Array(ppg.length).fill(1.0),
+                    note: `Estimate of the PPG Waveform using ${this.getMethodName()}. This method is not capable of providing a confidence estimate, hence returning 1.`,
+                },
+            },
+            time: rgb.getTimestamp(),
+            message: 'The provided values are estimates and should be interpreted according to the provided confidence levels ranging from 0 to 1. The WiseAI SDK is not a medical device and its estimates are not intended for any medical purposes.',
+        };
+    }
+}

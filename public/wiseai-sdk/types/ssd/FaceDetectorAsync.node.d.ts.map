@@ -1,0 +1,1 @@
+{"version":3,"file":"FaceDetectorAsync.node.d.ts","sourceRoot":"","sources":["../../../src/ssd/FaceDetectorAsync.node.ts"],"names":[],"mappings":"AACA,OAAO,EAAE,qBAAqB,EAAE,MAAM,0BAA0B,CAAC;AAMjE,qBAAa,iBAAkB,SAAQ,qBAAqB;IAC1D;;OAEG;cACa,IAAI,IAAI,OAAO,CAAC,IAAI,CAAC;CA4BtC"}

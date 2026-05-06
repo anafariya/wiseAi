@@ -1,0 +1,24 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env.production.local
+*.log
+.DS_Store
+.vercel
+
+# Editor / IDE
+.claude/
+.vscode/
+.idea/
+
+# Build artifacts
+*.tsbuildinfo
+
+# Local-only debug captures
+test-*.png
+
+# Personal cheat sheets — not deliverables for the hiring panel
+WHAT_AND_HOW.md
+DEPLOY.md
