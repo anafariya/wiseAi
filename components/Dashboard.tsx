@@ -13,13 +13,17 @@ import {
   type Metrics,
   type WiseAIMethod,
 } from "@/lib/rppg/types";
+import { PreflightChecker } from "@/lib/preflight/PreflightChecker";
+import { emptyPreflightStatus, type PreflightStatus } from "@/lib/preflight/types";
 import { ChunkHistoryChart } from "./ChunkHistoryChart";
 import { CurrentChunkPanel } from "./CurrentChunkPanel";
 import { FinalAggregatePanel } from "./FinalAggregatePanel";
+import { HrvPanel, emptyHrv, type HrvSnapshot } from "./HrvPanel";
 import { MetricsPanel } from "./MetricsPanel";
+import { PreflightPanel } from "./PreflightPanel";
 import { StatusBanner } from "./StatusBanner";
 
-type Mode = "idle" | "running" | "stopping" | "done" | "error";
+type Mode = "idle" | "preflighting" | "running" | "stopping" | "done" | "error";
 type InputMode = "webcam" | "file";
 
 export default function Dashboard() {
@@ -35,6 +39,10 @@ export default function Dashboard() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [warnMsg, setWarnMsg] = useState<string | null>(null);
   const [faceDetected, setFaceDetected] = useState(true);
+  const [preflight, setPreflight] = useState<PreflightStatus>(emptyPreflightStatus());
+  const [preflightLoaded, setPreflightLoaded] = useState(false);
+  const [noGlasses, setNoGlasses] = useState(false);
+  const [hrv, setHrv] = useState<HrvSnapshot>(emptyHrv);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -44,12 +52,33 @@ export default function Dashboard() {
   const tickRef = useRef<number | null>(null);
   const stopTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const preflightRef = useRef<PreflightChecker | null>(null);
 
   const currentChunkIndex = Math.min(
     TOTAL_CHUNKS - 1,
     Math.max(0, Math.floor(elapsed / CHUNK_DURATION_MS)),
   );
-  const currentChunk = chunks[currentChunkIndex] ?? null;
+  // The bucket at currentChunkIndex is in-progress and only finalizes when the
+  // next bucket starts receiving samples. Showing chunks[currentChunkIndex]
+  // would render "—" and "confidence 0%" the entire run, so we surface the
+  // most recent *finalized* chunk and label its index in the panel.
+  const latestFinalizedIndex = (() => {
+    for (let i = currentChunkIndex; i >= 0; i--) {
+      if (chunks[i]) return i;
+    }
+    return -1;
+  })();
+  const currentChunk =
+    latestFinalizedIndex >= 0 ? (chunks[latestFinalizedIndex] ?? null) : null;
+  const displayChunkIndex =
+    latestFinalizedIndex >= 0 ? latestFinalizedIndex : currentChunkIndex;
+
+  const stopPreflightChecker = useCallback(() => {
+    preflightRef.current?.stop();
+    preflightRef.current = null;
+    setPreflight(emptyPreflightStatus());
+    setPreflightLoaded(false);
+  }, []);
 
   const cleanup = useCallback(async () => {
     if (tickRef.current) {
@@ -60,6 +89,7 @@ export default function Dashboard() {
       clearTimeout(stopTimerRef.current);
       stopTimerRef.current = null;
     }
+    stopPreflightChecker();
     if (streamRef.current) {
       for (const t of streamRef.current.getTracks()) t.stop();
       streamRef.current = null;
@@ -72,12 +102,15 @@ export default function Dashboard() {
       }
       sessionRef.current = null;
     }
-  }, []);
+  }, [stopPreflightChecker]);
 
   const finishRun = useCallback(() => {
     aggRef.current?.finalizeAll();
     metricsRef.current?.endSession();
-    if (aggRef.current) setAggregate(aggRef.current.aggregate());
+    if (aggRef.current) {
+      setChunks(aggRef.current.getChunks());
+      setAggregate(aggRef.current.aggregate());
+    }
     if (metricsRef.current) setMetrics(metricsRef.current.snapshot());
     setMode("done");
     void cleanup();
@@ -93,6 +126,16 @@ export default function Dashboard() {
         m.recordVitalsEvent(e.tMs, e.result);
         agg.ingest(e.tMs, e.result);
         setChunks(agg.getChunks());
+        const sdnn = e.result.vitals.hrv_sdnn;
+        const rmssd = e.result.vitals.hrv_rmssd;
+        if (sdnn?.value !== undefined || rmssd?.value !== undefined) {
+          setHrv({
+            sdnnMs: sdnn?.value ?? null,
+            sdnnConfidence: sdnn?.confidence ?? 0,
+            rmssdMs: rmssd?.value ?? null,
+            rmssdConfidence: rmssd?.confidence ?? 0,
+          });
+        }
       } else if (e.type === "faceDetected") {
         agg.setFaceDetected(e.faceDetected);
         setFaceDetected(e.faceDetected);
@@ -111,13 +154,60 @@ export default function Dashboard() {
     [cleanup],
   );
 
-  const startWebcam = useCallback(async () => {
+  const enableCamera = useCallback(async () => {
     setErrorMsg(null);
     setWarnMsg(null);
     setAggregate(null);
     setChunks(Array.from({ length: TOTAL_CHUNKS }, () => null));
     setMetrics(emptyMetrics());
+    setHrv(emptyHrv());
     setElapsed(0);
+    setPreflight(emptyPreflightStatus());
+    setPreflightLoaded(false);
+    setMode("preflighting");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: "user", width: 640, height: 480 },
+      });
+      streamRef.current = stream;
+      const videoEl = videoRef.current;
+      if (!videoEl) throw new Error("Video element not mounted");
+      videoEl.srcObject = stream;
+      await videoEl.play().catch(() => {});
+
+      const checker = new PreflightChecker(videoEl);
+      preflightRef.current = checker;
+      checker.onUpdate(setPreflight);
+      await checker.start();
+      setPreflightLoaded(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to enable camera";
+      setErrorMsg(msg);
+      setMode("error");
+      await cleanup();
+    }
+  }, [cleanup]);
+
+  const cancelPreflight = useCallback(async () => {
+    await cleanup();
+    setMode("idle");
+  }, [cleanup]);
+
+  const startScanWebcam = useCallback(async () => {
+    const stream = streamRef.current;
+    const videoEl = videoRef.current;
+    if (!stream || !videoEl) {
+      setErrorMsg("Camera not active — enable camera first.");
+      return;
+    }
+    // Tear down preflight before handing the stream to the SDK so MediaPipe
+    // and the Wise AI SDK don't both pump frames concurrently.
+    stopPreflightChecker();
+
+    setErrorMsg(null);
+    setWarnMsg(null);
     setMode("running");
 
     const agg = new ChunkAggregator();
@@ -143,18 +233,9 @@ export default function Dashboard() {
     try {
       const initMs = await session.init();
       collector.recordSdkInit(initMs);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: "user", width: 640, height: 480 },
-      });
-      streamRef.current = stream;
-      const videoEl = videoRef.current;
-      if (!videoEl) throw new Error("Video element not mounted");
-      videoEl.srcObject = stream;
       collector.startSession();
       await session.startStream(stream, videoEl);
 
-      // 60s deadline.
       stopTimerRef.current = window.setTimeout(() => {
         session.stopStream();
         finishRun();
@@ -172,7 +253,7 @@ export default function Dashboard() {
       setMode("error");
       await cleanup();
     }
-  }, [cleanup, finishRun, handleEvent, method, mode]);
+  }, [cleanup, finishRun, handleEvent, method, mode, stopPreflightChecker]);
 
   const startFile = useCallback(
     async (file: File) => {
@@ -181,6 +262,7 @@ export default function Dashboard() {
       setAggregate(null);
       setChunks(Array.from({ length: TOTAL_CHUNKS }, () => null));
       setMetrics(emptyMetrics());
+      setHrv(emptyHrv());
       setElapsed(0);
       setMode("running");
 
@@ -207,7 +289,6 @@ export default function Dashboard() {
       try {
         const initMs = await session.init();
         collector.recordSdkInit(initMs);
-        // Show the file in the preview <video> for context.
         const videoEl = videoRef.current;
         if (videoEl) {
           videoEl.srcObject = null;
@@ -224,9 +305,6 @@ export default function Dashboard() {
         tickRef.current = requestAnimationFrame(tick);
 
         const result = await session.processFile(file);
-        // If the SDK didn't emit per-chunk vitals during file processing,
-        // fall back to one synthetic event with the final result so the user
-        // still sees numbers.
         if (agg.getChunks().every((c) => c === null)) {
           agg.ingest(0, result);
         }
@@ -247,13 +325,34 @@ export default function Dashboard() {
     finishRun();
   }, [finishRun]);
 
+  const handleInputModeChange = useCallback(
+    async (next: InputMode) => {
+      if (mode === "preflighting") {
+        await cleanup();
+        setMode("idle");
+      }
+      setInputMode(next);
+    },
+    [cleanup, mode],
+  );
+
   useEffect(() => {
     return () => {
       void cleanup();
     };
   }, [cleanup]);
 
+  // Pre-warm the Vercel serverless route so the first real /vitals request
+  // doesn't pay the ~300 ms cold-start init. Fire-and-forget.
+  useEffect(() => {
+    fetch("/api/wiseai-proxy/__warmup", { method: "GET", keepalive: true }).catch(
+      () => {},
+    );
+  }, []);
+
   const remaining = Math.max(0, TOTAL_DURATION_MS - elapsed);
+  const startDisabled = !preflight.ready;
+  const togglesDisabled = mode === "running" || mode === "stopping";
 
   return (
     <div className="max-w-5xl mx-auto px-5 py-8 space-y-6">
@@ -272,12 +371,12 @@ export default function Dashboard() {
           <ToggleGroup
             label="Input"
             value={inputMode}
-            onChange={setInputMode}
+            onChange={(v) => void handleInputModeChange(v)}
             options={[
               { v: "webcam", l: "Webcam" },
               { v: "file", l: "Upload file" },
             ]}
-            disabled={mode === "running"}
+            disabled={togglesDisabled}
           />
           <ToggleGroup
             label="Method"
@@ -289,24 +388,45 @@ export default function Dashboard() {
               { v: "chrom", l: "chrom (local)" },
               { v: "g", l: "g (local)" },
             ]}
-            disabled={mode === "running"}
+            disabled={togglesDisabled}
           />
 
           <div className="ml-auto flex gap-2">
             {inputMode === "webcam" ? (
-              mode === "running" ? (
+              mode === "running" || mode === "stopping" ? (
                 <button
                   onClick={stop}
                   className="px-4 py-2 rounded-md bg-bad/20 hover:bg-bad/30 text-bad text-sm font-medium"
                 >
                   Stop
                 </button>
+              ) : mode === "preflighting" ? (
+                <>
+                  <button
+                    onClick={() => void cancelPreflight()}
+                    className="px-4 py-2 rounded-md bg-border hover:bg-border/80 text-gray-200 text-sm font-medium"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => void startScanWebcam()}
+                    disabled={startDisabled}
+                    title={
+                      startDisabled
+                        ? "Pass the pre-capture checks before starting"
+                        : "Start 60s capture"
+                    }
+                    className="px-4 py-2 rounded-md bg-accent text-black text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Start 60s capture
+                  </button>
+                </>
               ) : (
                 <button
-                  onClick={startWebcam}
+                  onClick={() => void enableCamera()}
                   className="px-4 py-2 rounded-md bg-accent text-black text-sm font-medium hover:opacity-90"
                 >
-                  Start 60s capture
+                  {mode === "done" ? "New capture" : "Enable camera"}
                 </button>
               )
             ) : (
@@ -323,7 +443,7 @@ export default function Dashboard() {
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={mode === "running"}
+                  disabled={mode === "running" || mode === "stopping"}
                   className="px-4 py-2 rounded-md bg-accent text-black text-sm font-medium hover:opacity-90 disabled:opacity-40"
                 >
                   Upload video
@@ -372,6 +492,12 @@ export default function Dashboard() {
             No face detected — adjust position. The current chunk will be flagged.
           </StatusBanner>
         )}
+        {mode === "preflighting" && preflight.ready && !noGlasses && (
+          <StatusBanner tone="warn">
+            Heads up: glasses can degrade rPPG accuracy via specular reflection.
+            Confirm the box below if you&apos;re not wearing them.
+          </StatusBanner>
+        )}
         {mode === "done" && !errorMsg && (
           <StatusBanner tone="success">Run complete.</StatusBanner>
         )}
@@ -379,6 +505,14 @@ export default function Dashboard() {
 
       <div className="grid md:grid-cols-2 gap-6">
         <div className="space-y-6">
+          {mode === "preflighting" && inputMode === "webcam" && (
+            <PreflightPanel
+              status={preflight}
+              loaded={preflightLoaded}
+              noGlasses={noGlasses}
+              onNoGlassesChange={setNoGlasses}
+            />
+          )}
           <div className="panel p-2">
             <video
               ref={videoRef}
@@ -392,13 +526,14 @@ export default function Dashboard() {
           </div>
           <CurrentChunkPanel
             current={currentChunk}
-            chunkIndex={currentChunkIndex}
+            chunkIndex={displayChunkIndex}
             totalChunks={TOTAL_CHUNKS}
           />
           <ChunkHistoryChart chunks={chunks} />
         </div>
         <div className="space-y-6">
           <FinalAggregatePanel aggregate={aggregate} />
+          <HrvPanel hrv={hrv} />
           <MetricsPanel metrics={metrics} />
           <div className="panel p-5 text-xs text-muted leading-relaxed space-y-2">
             <div className="font-medium text-gray-300">How aggregation works</div>

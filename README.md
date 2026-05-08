@@ -15,6 +15,26 @@ Near real-time vitals (HR + RR) from a 60-second face video, processed in 5-seco
 4. **Aggregate** — final 60s number is the **confidence-weighted median** of valid chunks (face detected + HR confidence ≥ 0.5). If fewer than 3 chunks are valid, returns _insufficient data_ rather than fabricating a number.
 5. **Surface** — live current chunk, history bar chart (greyed bars = flagged), final aggregate panel, perf metrics table.
 
+The webcam path is gated by a **pre-capture quality checklist** (see below); file-upload is not (the file's already recorded).
+
+---
+
+## Pre-capture quality checklist (webcam path)
+
+Capture-side problems can't be fixed by aggregation tricks. Before the Wise AI SDK starts processing, the dashboard runs a real-time checklist using **MediaPipe FaceMesh** (loaded from CDN — no npm dep). Click **Enable camera** to see it.
+
+| Gate | Method | Threshold | Blocks Start? |
+| --- | --- | --- | --- |
+| Face proximity | `sqrt(eyeDist × faceHeight × faceWidth)` from landmarks 33/263/1/175/234/454 | 0.04 ≤ size ≤ 0.20 | yes |
+| Looking straight | Cheek-symmetry ratio from landmarks 1/234/454 | ≤ 0.35 | yes |
+| Lighting | Mean luminance over face bounding box, 0–255 | 80 ≤ value ≤ 220 | yes |
+| Camera FPS | Rolling 2-second window via `requestVideoFrameCallback` | ≥ 24 fps | yes |
+| Not wearing glasses | Manual checkbox — specs reflect light into the rPPG signal | n/a | no, advisory |
+
+**Why glasses are manual.** A reliable specs detector needs a small CNN — overkill for a take-home and risky to trust (false positives are worse than no check). A user prompt + manual confirmation is more dignified than an unreliable auto-detector. The pattern (lift face metrics from MediaPipe FaceMesh, gate the capture flow) is borrowed from production rPPG kiosks.
+
+The thresholds live in `lib/preflight/types.ts` — adjust if your camera or lighting environment differs.
+
 ---
 
 ## Quickstart
@@ -44,11 +64,15 @@ components/
   FinalAggregatePanel.tsx
   MetricsPanel.tsx
   StatusBanner.tsx
+  PreflightPanel.tsx                  # Pre-capture quality checklist UI
 lib/rppg/
   RppgSession.ts                      # Adapter around `WiseAI`
   ChunkAggregator.ts                  # 5s buckets + weighted median
   MetricsCollector.ts                 # init, TTFE, latency, FPS, runtime
   types.ts                            # Constants + result/option types
+lib/preflight/
+  PreflightChecker.ts                 # MediaPipe FaceMesh wrapper + gate computations
+  types.ts                            # PreflightStatus + thresholds
 public/wiseai-sdk/                    # The SDK bundle (gitignored if you prefer)
 ```
 

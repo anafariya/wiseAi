@@ -7,11 +7,13 @@
 
 import {
   CHUNK_DURATION_MS,
+  HAMPEL_K,
   TOTAL_CHUNKS,
   VALID_CONFIDENCE_THRESHOLD,
   MIN_VALID_CHUNKS_FOR_AGGREGATE,
   type AggregateResult,
   type ChunkResult,
+  type VitalAggregate,
   type WiseAIResult,
 } from "./types";
 
@@ -113,8 +115,15 @@ export class ChunkAggregator {
   }
 
   /**
-   * Final 60s aggregate. Confidence-weighted median over valid chunks.
-   * Returns insufficient_data if fewer than 3 chunks pass validity gating.
+   * Final 60s aggregate. Two-pass filter on top of the per-event confidence
+   * gate: (1) drop chunks where face was lost or HR-confidence < threshold;
+   * (2) Hampel filter — reject HR values that sit more than HAMPEL_K * sigma
+   * from the median, where sigma = 1.4826 * MAD. This catches motion-burst
+   * or lighting-spike chunks that pass the SDK's own confidence but disagree
+   * with the rest of the run.
+   *
+   * Reports per-vital insufficient_data: HR can succeed while RR fails the
+   * RR-specific confidence gate independently.
    */
   aggregate(): AggregateResult {
     const valid = this.chunks.filter(
@@ -138,18 +147,90 @@ export class ChunkAggregator {
       };
     }
 
+    // Hampel filter on HR. If it would leave us under the minimum, fall back
+    // to the unfiltered valid pool — better an honest median over noisy data
+    // than a misleading number from over-aggressive rejection.
+    const hrPass = hampelFilter(valid.map((c) => c.hr as number), HAMPEL_K);
+    const hrFiltered = valid.filter((_, i) => hrPass[i]);
+    const hampelRejected = valid.length - hrFiltered.length;
+    const hrPool =
+      hrFiltered.length >= MIN_VALID_CHUNKS_FOR_AGGREGATE ? hrFiltered : valid;
+
+    const hr = aggregateVital(hrPool, (c) => c.hr as number, (c) => c.hrConfidence);
+
+    // RR has its own confidence gate independent of HR — a noisy respiration
+    // signal shouldn't drop a chunk's HR vote, and vice versa.
+    const rrPool = valid.filter(
+      (c) => c.rr !== null && c.rrConfidence >= VALID_CONFIDENCE_THRESHOLD,
+    );
+    const rr: VitalAggregate =
+      rrPool.length < MIN_VALID_CHUNKS_FOR_AGGREGATE
+        ? {
+            kind: "insufficient_data",
+            reason:
+              rrPool.length === 0
+                ? "No chunks passed the RR confidence threshold."
+                : `Only ${rrPool.length} chunks had RR confidence ≥ ${VALID_CONFIDENCE_THRESHOLD}.`,
+          }
+        : aggregateVital(rrPool, (c) => c.rr as number, (c) => c.rrConfidence);
+
     return {
       kind: "ok",
-      hr: weightedMedian(valid.map((c) => ({ value: c.hr!, weight: c.hrConfidence }))),
-      rr: weightedMedian(
-        valid
-          .filter((c) => c.rr !== null && c.rrConfidence >= VALID_CONFIDENCE_THRESHOLD)
-          .map((c) => ({ value: c.rr!, weight: c.rrConfidence })),
-      ),
+      hr,
+      rr,
       validChunks: valid.length,
       totalChunks: total,
+      hampelRejected: hrFiltered.length >= MIN_VALID_CHUNKS_FOR_AGGREGATE ? hampelRejected : 0,
     };
   }
+}
+
+/**
+ * Confidence-weighted median plus a half-IQR uncertainty band over the
+ * (unweighted) values. IQR/2 is the standard half-width of a 50% interval
+ * — robust to the same outliers the median is robust to.
+ */
+function aggregateVital(
+  chunks: ChunkResult[],
+  getVal: (c: ChunkResult) => number,
+  getWeight: (c: ChunkResult) => number,
+): VitalAggregate {
+  const value = weightedMedian(
+    chunks.map((c) => ({ value: getVal(c), weight: getWeight(c) })),
+  );
+  const sorted = chunks.map(getVal).sort((a, b) => a - b);
+  const q1 = quantile(sorted, 0.25);
+  const q3 = quantile(sorted, 0.75);
+  const uncertainty = (q3 - q1) / 2;
+  return { kind: "ok", value, uncertainty, sampleCount: chunks.length };
+}
+
+function quantile(sorted: number[], q: number): number {
+  if (sorted.length === 0) return NaN;
+  const pos = (sorted.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  if (sorted[base + 1] !== undefined) {
+    return sorted[base] + rest * (sorted[base + 1] - sorted[base]);
+  }
+  return sorted[base];
+}
+
+/**
+ * Hampel filter: returns a boolean per input value, true = keep.
+ * Reject values more than k * sigma from the median, sigma = 1.4826 * MAD.
+ * No-op for n < 4 (not enough data to estimate spread reliably).
+ */
+function hampelFilter(values: number[], k: number): boolean[] {
+  if (values.length < 4) return values.map(() => true);
+  const sorted = [...values].sort((a, b) => a - b);
+  const median = quantile(sorted, 0.5);
+  const deviations = values.map((v) => Math.abs(v - median));
+  const sortedDev = [...deviations].sort((a, b) => a - b);
+  const mad = quantile(sortedDev, 0.5);
+  if (mad === 0) return values.map(() => true);
+  const sigma = 1.4826 * mad;
+  return values.map((v) => Math.abs(v - median) <= k * sigma);
 }
 
 /**

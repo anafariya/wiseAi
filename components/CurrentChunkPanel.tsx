@@ -34,9 +34,11 @@ export function CurrentChunkPanel({
             <div className="text-4xl font-mono font-semibold">{fmt(current?.hr ?? null)}</div>
             <div className="text-sm text-muted">bpm</div>
           </div>
-          <div className={`text-xs mt-1 ${confidenceTone(current?.hrConfidence ?? 0)}`}>
-            confidence {current ? Math.round((current.hrConfidence ?? 0) * 100) : 0}%
-          </div>
+          {current && current.hrConfidence > 0 && (
+            <div className={`text-xs mt-1 ${confidenceTone(current.hrConfidence)}`}>
+              confidence {Math.round(current.hrConfidence * 100)}%
+            </div>
+          )}
         </div>
         <div>
           <div className="text-xs text-muted mb-1">Respiratory Rate</div>
@@ -44,9 +46,11 @@ export function CurrentChunkPanel({
             <div className="text-4xl font-mono font-semibold">{fmt(current?.rr ?? null)}</div>
             <div className="text-sm text-muted">br/min</div>
           </div>
-          <div className={`text-xs mt-1 ${confidenceTone(current?.rrConfidence ?? 0)}`}>
-            confidence {current ? Math.round((current.rrConfidence ?? 0) * 100) : 0}%
-          </div>
+          {current && current.rrConfidence > 0 && (
+            <div className={`text-xs mt-1 ${confidenceTone(current.rrConfidence)}`}>
+              confidence {Math.round(current.rrConfidence * 100)}%
+            </div>
+          )}
         </div>
       </div>
     </div>

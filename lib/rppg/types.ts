@@ -65,8 +65,24 @@ export type ChunkResult = {
   emittedAt: number;        // wall-clock ms when this chunk was finalized
 };
 
+export type VitalAggregate =
+  | {
+      kind: "ok";
+      value: number;
+      uncertainty: number; // half-width of the IQR (50% interval) over the valid pool
+      sampleCount: number;
+    }
+  | { kind: "insufficient_data"; reason: string };
+
 export type AggregateResult =
-  | { kind: "ok"; hr: number; rr: number; validChunks: number; totalChunks: number }
+  | {
+      kind: "ok";
+      hr: VitalAggregate;
+      rr: VitalAggregate;
+      validChunks: number;
+      totalChunks: number;
+      hampelRejected: number; // chunks discarded by the second-pass MAD filter
+    }
   | { kind: "insufficient_data"; validChunks: number; totalChunks: number; reason: string };
 
 export type Metrics = {
@@ -84,3 +100,7 @@ export const TOTAL_DURATION_MS = 60000;
 export const TOTAL_CHUNKS = TOTAL_DURATION_MS / CHUNK_DURATION_MS; // 12
 export const VALID_CONFIDENCE_THRESHOLD = 0.5;
 export const MIN_VALID_CHUNKS_FOR_AGGREGATE = 3;
+// Hampel filter parameter: reject chunks more than HAMPEL_K * (1.4826 * MAD)
+// from the median. k=3.0 is conservative — drops only obvious outliers
+// (motion bursts, lighting jumps) while preserving real HR variation.
+export const HAMPEL_K = 3.0;
